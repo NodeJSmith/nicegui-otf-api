@@ -6,36 +6,16 @@ from middleware import AuthMiddleware
 from nicegui import app, ui
 from otf_api import Otf, OtfUser
 from pycognito.exceptions import TokenVerificationException
+from storage import LocalStorage, add_otf_to_storage, add_user_to_storage, clear_all_storage
+
+LOCAL_STORAGE = LocalStorage()
 
 app.add_middleware(AuthMiddleware)
 
 
-def add_user_to_storage(user: OtfUser) -> None:
-    app.storage.user["tokens"] = user.get_tokens()
-    app.storage.user["device_key"] = user.device_key
-    app.storage.tab["user"] = user
-
-
-def add_otf_to_storage(otf: Otf) -> None:
-    app.storage.tab["otf"] = otf
-    app.storage.user["otf_hydration_dict"] = otf.get_hydration_dict()
-
-
-@contextmanager
-def header_and_card():
-    with ui.header().style("padding: 0"), ui.tabs().classes("w-full"):
-        one = ui.tab("Classes")
-        one.on("click", lambda: ui.navigate.to("/classes"))
-        two = ui.tab("Upcoming CLasses")
-        two.on("click", lambda: ui.navigate.to("/upcoming_classes"))
-    with ui.footer():
-        ui.button(
-            text=app.storage.user.get("username", ""),
-            on_click=lambda: (app.storage.user.clear(), ui.navigate.to("/login")),
-            icon="logout",
-        ).classes("absolute top-0 right-0").props("style: unelevated")
-    with ui.card().classes("absolute-top items-center w-full h-full"):
-        yield
+def logout() -> None:
+    clear_all_storage()
+    ui.navigate.to("/login")
 
 
 async def get_otf() -> Otf:
@@ -50,7 +30,7 @@ async def get_otf() -> Otf:
     if "otf_hydration_dict" in app.storage.user and "device_key" in app.storage.tab:
         logger.info("got otf from stored hydration dict")
         otf = Otf.hydrate(**app.storage.user["otf_hydration_dict"], device_key=app.storage.tab["device_key"])
-        add_otf_to_storage
+        add_otf_to_storage(otf)
         return otf
 
     logger.info("creating new otf...")
@@ -76,15 +56,29 @@ async def get_user() -> OtfUser:
     logger.info("getting user from stored tokens...")
 
     try:
-        user = OtfUser.from_token(**app.storage.user["tokens"], device_key=app.storage.user["device_key"])
+        device_key = await LocalStorage.get_item("device_key")
+        user = OtfUser.from_token(**app.storage.user["tokens"], device_key=device_key)
         logger.info("got user from stored tokens")
         app.storage.tab["user"] = user
         return app.storage.tab["user"]
     except (TokenVerificationException, KeyError):
         ui.notify("Your token has expired, please log in again", color="negative")
-        app.storage.user.clear()
-        app.storage.user["referrer_path"] = ui.context.client.request.url.path
-        ui.navigate.to("/login")
+        await logout()
+
+
+@contextmanager
+def header_and_card():
+    with ui.header().style("padding: 0"), ui.tabs().classes("w-full"):
+        one = ui.tab("Classes")
+        one.on("click", lambda: ui.navigate.to("/classes"))
+        two = ui.tab("Upcoming CLasses")
+        two.on("click", lambda: ui.navigate.to("/upcoming_classes"))
+    with ui.footer():
+        ui.button(text=app.storage.user.get("username", ""), on_click=logout, icon="logout").classes(
+            "absolute top-0 right-0"
+        ).props("style: unelevated")
+    with ui.card().classes("absolute-top items-center w-full h-full"):
+        yield
 
 
 @ui.page("/")
@@ -206,15 +200,15 @@ async def classes() -> None:
                 {"headerName": "Home Studio", "field": "Home Studio"},
             ],
             "rowData": rows,
-            "domLayouter": "autoHeight",
+            # "domLayout": "autoHeight",
         }
 
-        _ = ui.aggrid(options=ag_grid_data).classes("w-full h-screen")
+        _ = ui.aggrid(options=ag_grid_data)
 
 
 @ui.page("/login")
 async def login() -> RedirectResponse | None:
-    def try_login() -> None:
+    async def try_login() -> None:
         try:
             if not app.storage.user.get("authenticated"):
                 with ui.spinner():
@@ -223,7 +217,7 @@ async def login() -> RedirectResponse | None:
                     logger.info("logged in")
                     app.storage.user.update({"username": username.value, "authenticated": True})
                     logger.info("updated username")
-                    add_user_to_storage(user)
+                    await add_user_to_storage(user)
                     logger.info("updated storage")
                     ui.navigate.to(app.storage.user.get("referrer_path", "/upcoming_classes"))
 
